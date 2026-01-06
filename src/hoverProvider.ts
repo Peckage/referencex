@@ -3,8 +3,8 @@ import * as vscode from 'vscode';
 export class ReferenceHoverProvider implements vscode.HoverProvider {
     private isTestFile(uri: vscode.Uri): boolean {
         const path = uri.fsPath.toLowerCase();
-        return path.includes('.test.') || 
-               path.includes('.spec.') || 
+        return path.includes('.test.') ||
+               path.includes('.spec.') ||
                path.includes('__tests__') ||
                path.includes('/tests/');
     }
@@ -27,7 +27,7 @@ export class ReferenceHoverProvider implements vscode.HoverProvider {
             if (symbol.selectionRange.contains(position)) {
                 const config = vscode.workspace.getConfiguration('referencex');
                 const showVariables = config.get('showVariables', false);
-                
+
                 // Only provide hover for relevant symbol types
                 if (
                     symbol.kind === vscode.SymbolKind.Function ||
@@ -106,7 +106,7 @@ export class ReferenceHoverProvider implements vscode.HoverProvider {
             } else {
                 const refText = displayCount === 1 ? 'reference' : 'references';
                 markdown.appendMarkdown(`**📍 ${displayCount} ${refText}**\n\n`);
-                
+
                 // Create clickable command link
                 const args = encodeURIComponent(JSON.stringify([
                     document.uri,
@@ -115,31 +115,31 @@ export class ReferenceHoverProvider implements vscode.HoverProvider {
                 ]));
                 const commandUri = `command:editor.action.showReferences?${args}`;
                 markdown.appendMarkdown(`[View all references](${commandUri})\n\n`);
-                
+
                 // Show first few reference locations
                 if (locations && locations.length > 1) {
                     markdown.appendMarkdown('---\n\n**Reference locations:**\n\n');
                     const maxShow = Math.min(5, locations.length - 1); // -1 to exclude definition
                     let shown = 0;
-                    
+
                     for (const location of locations) {
                         if (shown >= maxShow) break;
-                        
+
                         // Skip the definition itself
                         if (location.uri.toString() === document.uri.toString() &&
                             location.range.start.line === symbol.selectionRange.start.line) {
                             continue;
                         }
-                        
+
                         const workspaceFolder = vscode.workspace.getWorkspaceFolder(location.uri);
-                        const relativePath = workspaceFolder 
+                        const relativePath = workspaceFolder
                             ? vscode.workspace.asRelativePath(location.uri)
                             : location.uri.fsPath;
-                        
+
                         markdown.appendMarkdown(`- \`${relativePath}:${location.range.start.line + 1}\`\n`);
                         shown++;
                     }
-                    
+
                     if (locations.length - 1 > maxShow) {
                         markdown.appendMarkdown(`\n_...and ${locations.length - 1 - maxShow} more_`);
                     }

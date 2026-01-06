@@ -89,16 +89,48 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
 
     private isTestFile(uri: vscode.Uri): boolean {
         const path = uri.fsPath.toLowerCase();
-        return path.includes('.test.') || 
-               path.includes('.spec.') || 
+        return path.includes('.test.') ||
+               path.includes('.spec.') ||
                path.includes('__tests__') ||
                path.includes('/tests/');
+    }
+
+    private async filterImportReferences(locations: vscode.Location[], definitionUri: vscode.Uri): Promise<vscode.Location[]> {
+        const filteredLocations: vscode.Location[] = [];
+
+        for (const location of locations) {
+            // Always include the definition itself
+            if (location.uri.toString() === definitionUri.toString() &&
+                location.range.start.line === locations[0]?.range.start.line) {
+                filteredLocations.push(location);
+                continue;
+            }
+
+            try {
+                const doc = await vscode.workspace.openTextDocument(location.uri);
+                const line = doc.lineAt(location.range.start.line).text.trim();
+
+                // Skip if the line is an import statement
+                if (line.startsWith('import ') || line.startsWith('import{') ||
+                    line.startsWith('export ') && line.includes(' from ') ||
+                    line.match(/^(import|export)\s*\(/)) {
+                    continue;
+                }
+
+                filteredLocations.push(location);
+            } catch {
+                // If we can't read the document, include the location
+                filteredLocations.push(location);
+            }
+        }
+
+        return filteredLocations;
     }
 
     public provideCodeLenses(document: vscode.TextDocument, token: vscode.CancellationToken): vscode.CodeLens[] | Thenable<vscode.CodeLens[]> {
         this.documentUri = document.uri;
         const config = this.getConfig();
-        
+
         // Only provide CodeLens if in CodeLens mode
         if (!config.enabled || config.displayMode !== 'codelens') {
             return [];
@@ -119,6 +151,12 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
             { regex: /^\s*(export\s+)?(async\s+)?function\s+(\w+)(<[^>]*>)?/, type: 'function' },
             { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*:\s*[^=]*=\s*(async\s+)?\([^)]*\)\s*=>/, type: 'function' },
             { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\([^)]*\)\s*=>/, type: 'function' },
+            // Multi-line arrow functions with type annotation (params on multiple lines)
+            { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*:\s*[^=]*=\s*(async\s+)?\(\s*$/, type: 'function' },
+            { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*:\s*[^=]*=\s*(async\s+)?\(\{\s*$/, type: 'function' },
+            // Multi-line arrow functions without type annotation (params on multiple lines)
+            { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(\s*$/, type: 'function' },
+            { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(\{\s*$/, type: 'function' },
             { regex: /^\s*(public|private|protected)?\s*(static\s+)?(async\s+)?(get\s+|set\s+)?(\w+)\s*(<[^>]*>)?\s*\([^)]*\)\s*[:{]/, type: 'method' },
         ];
 
@@ -132,7 +170,7 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
 
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
-            
+
             for (const pattern of patterns) {
                 const match = line.match(pattern.regex);
                 if (match) {
@@ -153,10 +191,10 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
         }
 
         const config = this.getConfig();
-        
+
         try {
             const document = await vscode.workspace.openTextDocument(this.documentUri);
-            
+
             const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
                 'vscode.executeDocumentSymbolProvider',
                 this.documentUri
@@ -175,15 +213,17 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
                 return codeLens;
             }
 
-            const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+            const allLocations = await vscode.commands.executeCommand<vscode.Location[]>(
                 'vscode.executeReferenceProvider',
                 this.documentUri,
                 symbol.selectionRange.start
             );
 
-            const referenceCount = locations ? locations.length - 1 : 0;
+            // Filter out import statements from references
+            const locations = allLocations ? await this.filterImportReferences(allLocations, this.documentUri) : [];
+            const referenceCount = locations.length - 1;
             const displayCount = Math.max(0, referenceCount);
-            
+
             if (displayCount === 0 && !config.showZeroReferences) {
                 return codeLens;
             }
@@ -193,7 +233,7 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
             }
 
             const { title } = this.formatReferenceText(displayCount, symbol.kind, config);
-            
+
             codeLens.command = {
                 title: title,
                 command: displayCount > 0 ? 'editor.action.showReferences' : '',
@@ -217,7 +257,7 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
 
     private async updateInlineDecorations(editor: vscode.TextEditor) {
         const config = this.getConfig();
-        
+
         // Only show inline decorations if in inline mode
         if (!config.enabled || config.displayMode !== 'inline') {
             editor.setDecorations(this.decorationType, []);
@@ -235,11 +275,25 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
 
         const patterns = [
             { regex: /^\s*(export\s+)?(abstract\s+)?class\s+(\w+)(<[^>]*>)?/, type: 'class' },
+
             { regex: /^\s*(export\s+)?interface\s+(\w+)(<[^>]*>)?/, type: 'interface' },
+
             { regex: /^\s*(export\s+)?type\s+(\w+)(<[^>]*>)?\s*=/, type: 'type' },
+
             { regex: /^\s*(export\s+)?(async\s+)?function\s+(\w+)(<[^>]*>)?/, type: 'function' },
+
             { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*:\s*[^=]*=\s*(async\s+)?\([^)]*\)\s*=>/, type: 'function' },
+
             { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\([^)]*\)\s*=>/, type: 'function' },
+
+            // Multi-line arrow functions with type annotation (params on multiple lines)
+            { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*:\s*[^=]*=\s*(async\s+)?\(\s*$/, type: 'function' },
+            { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*:\s*[^=]*=\s*(async\s+)?\(\{\s*$/, type: 'function' },
+
+            // Multi-line arrow functions without type annotation (params on multiple lines)
+            { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(\s*$/, type: 'function' },
+            { regex: /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(\{\s*$/, type: 'function' },
+
             { regex: /^\s*(public|private|protected)?\s*(static\s+)?(async\s+)?(get\s+|set\s+)?(\w+)\s*(<[^>]*>)?\s*\(/, type: 'method' },
         ];
 
@@ -264,23 +318,25 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
 
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
-                
+
                 for (const pattern of patterns) {
                     const match = line.match(pattern.regex);
                     if (match) {
                         const position = new vscode.Position(i, 0);
                         const symbol = this.findSymbolAtPosition(symbols, position);
-                        
+
                         if (symbol) {
-                            const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+                            const allLocations = await vscode.commands.executeCommand<vscode.Location[]>(
                                 'vscode.executeReferenceProvider',
                                 editor.document.uri,
                                 symbol.selectionRange.start
                             );
 
-                            const referenceCount = locations ? locations.length - 1 : 0;
+                            // Filter out import statements from references
+                            const locations = allLocations ? await this.filterImportReferences(allLocations, editor.document.uri) : [];
+                            const referenceCount = locations.length - 1;
                             const displayCount = Math.max(0, referenceCount);
-                            
+
                             if (displayCount === 0 && !config.showZeroReferences) {
                                 break;
                             }
@@ -290,7 +346,7 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
                             }
 
                             const { title, color } = this.formatReferenceText(displayCount, symbol.kind, config);
-                            
+
                             const decoration: vscode.DecorationOptions = {
                                 range: new vscode.Range(i, line.length, i, line.length),
                                 renderOptions: {
@@ -301,7 +357,7 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
                                     }
                                 }
                             };
-                            
+
                             decorations.push(decoration);
                         }
                         break;
@@ -345,7 +401,7 @@ export class ReferenceLensProvider implements vscode.CodeLensProvider {
 
         const refText = count === 1 ? 'ref' : 'refs';
         const title = `${icon} ${count} ${refText}`;
-        
+
         return { title, color };
     }
 

@@ -17,13 +17,13 @@ export class DependencyTreeItem extends vscode.TreeItem {
         public readonly itemType?: 'root' | 'file' | 'symbol' | 'reference'
     ) {
         super(label, collapsibleState);
-        
+
         if (symbolInfo) {
             this.tooltip = this.createTooltip();
             this.description = this.createDescription();
             this.iconPath = this.getIconPath();
             this.contextValue = itemType;
-            
+
             // Make references clickable
             if (itemType === 'reference' || itemType === 'symbol') {
                 this.command = {
@@ -37,26 +37,26 @@ export class DependencyTreeItem extends vscode.TreeItem {
 
     private createTooltip(): string {
         if (!this.symbolInfo) return '';
-        
+
         const type = this.getSymbolTypeName(this.symbolInfo.kind);
         return `${type} "${this.symbolInfo.name}" - ${this.symbolInfo.referenceCount} references`;
     }
 
     private createDescription(): string {
         if (!this.symbolInfo) return '';
-        
+
         if (this.itemType === 'symbol') {
             return `${this.symbolInfo.referenceCount} refs`;
         }
-        
+
         if (this.itemType === 'reference') {
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(this.symbolInfo.uri);
-            const relativePath = workspaceFolder 
+            const relativePath = workspaceFolder
                 ? vscode.workspace.asRelativePath(this.symbolInfo.uri)
                 : this.symbolInfo.uri.fsPath;
             return `line ${this.symbolInfo.range.start.line + 1}`;
         }
-        
+
         return '';
     }
 
@@ -94,9 +94,9 @@ export class DependencyTreeItem extends vscode.TreeItem {
 }
 
 export class DependencyTreeProvider implements vscode.TreeDataProvider<DependencyTreeItem> {
-    private _onDidChangeTreeData: vscode.EventEmitter<DependencyTreeItem | undefined | null | void> = 
+    private _onDidChangeTreeData: vscode.EventEmitter<DependencyTreeItem | undefined | null | void> =
         new vscode.EventEmitter<DependencyTreeItem | undefined | null | void>();
-    readonly onDidChangeTreeData: vscode.Event<DependencyTreeItem | undefined | null | void> = 
+    readonly onDidChangeTreeData: vscode.Event<DependencyTreeItem | undefined | null | void> =
         this._onDidChangeTreeData.event;
 
     private currentSymbol?: SymbolInfo;
@@ -136,12 +136,12 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
         if (element.itemType === 'root' && element.symbolInfo) {
             // Show main categories
             const items: DependencyTreeItem[] = [];
-            
+
             // Used By section
             const usedByItem = new DependencyTreeItem(
                 `$(references) Used By (${element.symbolInfo.referenceCount})`,
-                element.symbolInfo.referenceCount > 0 
-                    ? vscode.TreeItemCollapsibleState.Expanded 
+                element.symbolInfo.referenceCount > 0
+                    ? vscode.TreeItemCollapsibleState.Expanded
                     : vscode.TreeItemCollapsibleState.None
             );
             usedByItem.contextValue = 'usedby';
@@ -172,14 +172,14 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
         if (element.contextValue === 'usedby' && this.currentSymbol?.references) {
             // Group references by file
             const referencesByFile = new Map<string, vscode.Location[]>();
-            
+
             for (const ref of this.currentSymbol.references) {
                 // Skip the definition itself
                 if (ref.uri.toString() === this.currentSymbol.uri.toString() &&
                     ref.range.start.line === this.currentSymbol.range.start.line) {
                     continue;
                 }
-                
+
                 const fileKey = ref.uri.toString();
                 if (!referencesByFile.has(fileKey)) {
                     referencesByFile.set(fileKey, []);
@@ -188,14 +188,14 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
             }
 
             const items: DependencyTreeItem[] = [];
-            
+
             for (const [fileUri, refs] of referencesByFile) {
                 const uri = vscode.Uri.parse(fileUri);
                 const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
-                const relativePath = workspaceFolder 
+                const relativePath = workspaceFolder
                     ? vscode.workspace.asRelativePath(uri)
                     : uri.fsPath;
-                
+
                 const fileItem = new DependencyTreeItem(
                     `$(file) ${relativePath}`,
                     vscode.TreeItemCollapsibleState.Expanded
@@ -213,7 +213,7 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
                         range: ref.range,
                         referenceCount: 0
                     };
-                    
+
                     const refItem = new DependencyTreeItem(
                         `Line ${ref.range.start.line + 1}`,
                         vscode.TreeItemCollapsibleState.None,
@@ -230,7 +230,7 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
         if (element.contextValue === 'dependencies' && this.currentSymbol) {
             // Find what symbols this symbol depends on
             const dependencies = await this.findDependencies(this.currentSymbol);
-            
+
             if (dependencies.length === 0) {
                 const item = new DependencyTreeItem(
                     '$(check) No dependencies found',
@@ -253,13 +253,13 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
 
         if (element.contextValue === 'impact' && this.currentSymbol) {
             const impact = await this.analyzeImpact(this.currentSymbol);
-            
+
             const items: DependencyTreeItem[] = [];
-            
+
             // Summary
             const summaryItem = new DependencyTreeItem(
-                impact.canSafelyDelete 
-                    ? '$(check) Safe to delete' 
+                impact.canSafelyDelete
+                    ? '$(check) Safe to delete'
                     : `$(warning) Would affect ${impact.affectedFiles.size} files`,
                 vscode.TreeItemCollapsibleState.None
             );
@@ -273,10 +273,10 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
                 for (const [filePath, count] of impact.affectedFiles) {
                     const uri = vscode.Uri.parse(filePath);
                     const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
-                    const relativePath = workspaceFolder 
+                    const relativePath = workspaceFolder
                         ? vscode.workspace.asRelativePath(uri)
                         : uri.fsPath;
-                    
+
                     const fileItem = new DependencyTreeItem(
                         `$(file) ${relativePath}`,
                         vscode.TreeItemCollapsibleState.None
@@ -346,7 +346,7 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
             if (symbol.selectionRange.contains(position)) {
                 const config = vscode.workspace.getConfiguration('referencex');
                 const showVariables = config.get('showVariables', false);
-                
+
                 if (
                     symbol.kind === vscode.SymbolKind.Function ||
                     symbol.kind === vscode.SymbolKind.Method ||
@@ -371,11 +371,11 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
 
     private async findDependencies(symbolInfo: SymbolInfo): Promise<SymbolInfo[]> {
         const dependencies: SymbolInfo[] = [];
-        
+
         try {
             const document = await vscode.workspace.openTextDocument(symbolInfo.uri);
             const text = document.getText(symbolInfo.range);
-            
+
             // Get all symbols in the workspace
             const files = await vscode.workspace.findFiles(
                 '**/*.{ts,tsx,js,jsx}',
@@ -383,7 +383,7 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
             );
 
             const symbolNames = new Set<string>();
-            
+
             for (const file of files) {
                 const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
                     'vscode.executeDocumentSymbolProvider',
@@ -468,7 +468,7 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
         affectedFiles: Map<string, number>;
     }> {
         const affectedFiles = new Map<string, number>();
-        
+
         if (symbolInfo.references) {
             for (const ref of symbolInfo.references) {
                 // Skip the definition
@@ -503,7 +503,7 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
         if (this.currentSymbol.references) {
             let refId = 1;
             const fileRefs = new Map<string, number>();
-            
+
             for (const ref of this.currentSymbol.references) {
                 if (ref.uri.toString() === this.currentSymbol.uri.toString() &&
                     ref.range.start.line === this.currentSymbol.range.start.line) {
@@ -511,13 +511,13 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
                 }
 
                 const workspaceFolder = vscode.workspace.getWorkspaceFolder(ref.uri);
-                const relativePath = workspaceFolder 
+                const relativePath = workspaceFolder
                     ? vscode.workspace.asRelativePath(ref.uri)
                     : ref.uri.fsPath;
-                
+
                 const fileName = relativePath.split('/').pop() || relativePath;
                 const fileKey = `F${refId}`;
-                
+
                 if (!fileRefs.has(fileName)) {
                     fileRefs.set(fileName, refId);
                     mermaid += `    ${fileKey}["${fileName}"]\n`;

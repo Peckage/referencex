@@ -11,7 +11,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register CodeLens provider for supported languages
     const languages = ['typescript', 'javascript', 'typescriptreact', 'javascriptreact'];
-    
+
     for (const language of languages) {
         const disposable = vscode.languages.registerCodeLensProvider(
             { language, scheme: 'file' },

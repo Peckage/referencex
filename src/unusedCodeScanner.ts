@@ -15,8 +15,8 @@ interface FileWithUnused {
 export class UnusedCodeScanner {
     private isTestFile(uri: vscode.Uri): boolean {
         const path = uri.fsPath.toLowerCase();
-        return path.includes('.test.') || 
-               path.includes('.spec.') || 
+        return path.includes('.test.') ||
+               path.includes('.spec.') ||
                path.includes('__tests__') ||
                path.includes('/tests/');
     }
@@ -173,7 +173,7 @@ export class UnusedCodeScanner {
         // Group by file
         for (const file of filesWithUnused) {
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(file.uri);
-            const relativePath = workspaceFolder 
+            const relativePath = workspaceFolder
                 ? vscode.workspace.asRelativePath(file.uri)
                 : file.uri.fsPath;
 
