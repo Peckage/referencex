@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { ReferenceService } from './referenceService';
 
 interface SymbolInfo {
     name: string;
@@ -24,7 +25,6 @@ export class DependencyTreeItem extends vscode.TreeItem {
             this.iconPath = this.getIconPath();
             this.contextValue = itemType;
 
-            // Make references clickable
             if (itemType === 'reference' || itemType === 'symbol') {
                 this.command = {
                     command: 'referencex.goToLocation',
@@ -36,49 +36,28 @@ export class DependencyTreeItem extends vscode.TreeItem {
     }
 
     private createTooltip(): string {
-        if (!this.symbolInfo) return '';
-
+        if (!this.symbolInfo) {
+            return '';
+        }
         const type = this.getSymbolTypeName(this.symbolInfo.kind);
-        return `${type} "${this.symbolInfo.name}" - ${this.symbolInfo.referenceCount} references`;
+        return `${type} "${this.symbolInfo.name}" — ${this.symbolInfo.referenceCount} references`;
     }
 
     private createDescription(): string {
-        if (!this.symbolInfo) return '';
-
+        if (!this.symbolInfo) {
+            return '';
+        }
         if (this.itemType === 'symbol') {
             return `${this.symbolInfo.referenceCount} refs`;
         }
-
         if (this.itemType === 'reference') {
-            const workspaceFolder = vscode.workspace.getWorkspaceFolder(this.symbolInfo.uri);
-            const relativePath = workspaceFolder
-                ? vscode.workspace.asRelativePath(this.symbolInfo.uri)
-                : this.symbolInfo.uri.fsPath;
             return `line ${this.symbolInfo.range.start.line + 1}`;
         }
-
         return '';
     }
 
     private getIconPath(): vscode.ThemeIcon {
-        if (!this.symbolInfo) {
-            return new vscode.ThemeIcon('symbol-misc');
-        }
-
-        switch (this.symbolInfo.kind) {
-            case vscode.SymbolKind.Function:
-                return new vscode.ThemeIcon('symbol-function');
-            case vscode.SymbolKind.Method:
-                return new vscode.ThemeIcon('symbol-method');
-            case vscode.SymbolKind.Class:
-                return new vscode.ThemeIcon('symbol-class');
-            case vscode.SymbolKind.Interface:
-                return new vscode.ThemeIcon('symbol-interface');
-            case vscode.SymbolKind.Variable:
-                return new vscode.ThemeIcon('symbol-variable');
-            default:
-                return new vscode.ThemeIcon('symbol-misc');
-        }
+        return new vscode.ThemeIcon(`symbol-${getSymbolIcon(this.symbolInfo?.kind)}`);
     }
 
     private getSymbolTypeName(kind: vscode.SymbolKind): string {
@@ -87,23 +66,38 @@ export class DependencyTreeItem extends vscode.TreeItem {
             case vscode.SymbolKind.Method: return 'Method';
             case vscode.SymbolKind.Class: return 'Class';
             case vscode.SymbolKind.Interface: return 'Interface';
+            case vscode.SymbolKind.Constructor: return 'Constructor';
             case vscode.SymbolKind.Variable: return 'Variable';
             default: return 'Symbol';
         }
     }
 }
 
+function getSymbolIcon(kind: vscode.SymbolKind | undefined): string {
+    switch (kind) {
+        case vscode.SymbolKind.Function: return 'function';
+        case vscode.SymbolKind.Method: return 'method';
+        case vscode.SymbolKind.Class: return 'class';
+        case vscode.SymbolKind.Interface: return 'interface';
+        case vscode.SymbolKind.Constructor: return 'constructor';
+        case vscode.SymbolKind.Variable: return 'variable';
+        default: return 'misc';
+    }
+}
+
 export class DependencyTreeProvider implements vscode.TreeDataProvider<DependencyTreeItem> {
-    private _onDidChangeTreeData: vscode.EventEmitter<DependencyTreeItem | undefined | null | void> =
+    private readonly _onDidChangeTreeData =
         new vscode.EventEmitter<DependencyTreeItem | undefined | null | void>();
-    readonly onDidChangeTreeData: vscode.Event<DependencyTreeItem | undefined | null | void> =
-        this._onDidChangeTreeData.event;
+    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
     private currentSymbol?: SymbolInfo;
+    /** Outgoing-call dependencies, computed once per selected symbol. */
+    private dependencyCache?: SymbolInfo[];
 
-    constructor() {}
+    constructor(private readonly service: ReferenceService) {}
 
     refresh(): void {
+        this.dependencyCache = undefined;
         this._onDidChangeTreeData.fire();
     }
 
@@ -113,429 +107,270 @@ export class DependencyTreeProvider implements vscode.TreeDataProvider<Dependenc
 
     async getChildren(element?: DependencyTreeItem): Promise<DependencyTreeItem[]> {
         if (!element) {
-            // Root level - show current symbol or prompt
-            if (this.currentSymbol) {
-                return [
-                    new DependencyTreeItem(
-                        `$(symbol-${this.getSymbolIcon(this.currentSymbol.kind)}) ${this.currentSymbol.name}`,
-                        vscode.TreeItemCollapsibleState.Expanded,
-                        this.currentSymbol,
-                        'root'
-                    )
-                ];
-            } else {
+            if (!this.currentSymbol) {
                 const item = new DependencyTreeItem(
                     '$(info) Select a symbol to view dependencies',
                     vscode.TreeItemCollapsibleState.None
                 );
-                item.tooltip = 'Right-click on a function, class, or method and select "Show Dependencies"';
+                item.tooltip = 'Right-click a function, class, or method and choose "Show Dependencies"';
                 return [item];
             }
+            return [
+                new DependencyTreeItem(
+                    `$(symbol-${getSymbolIcon(this.currentSymbol.kind)}) ${this.currentSymbol.name}`,
+                    vscode.TreeItemCollapsibleState.Expanded,
+                    this.currentSymbol,
+                    'root'
+                )
+            ];
         }
 
         if (element.itemType === 'root' && element.symbolInfo) {
-            // Show main categories
-            const items: DependencyTreeItem[] = [];
-
-            // Used By section
-            const usedByItem = new DependencyTreeItem(
+            const usedBy = new DependencyTreeItem(
                 `$(references) Used By (${element.symbolInfo.referenceCount})`,
                 element.symbolInfo.referenceCount > 0
                     ? vscode.TreeItemCollapsibleState.Expanded
                     : vscode.TreeItemCollapsibleState.None
             );
-            usedByItem.contextValue = 'usedby';
-            usedByItem.tooltip = `${element.symbolInfo.referenceCount} references to this symbol`;
-            items.push(usedByItem);
+            usedBy.contextValue = 'usedby';
+            usedBy.tooltip = `${element.symbolInfo.referenceCount} references to this symbol`;
 
-            // Dependencies section (what this symbol uses)
-            const depsItem = new DependencyTreeItem(
+            const deps = new DependencyTreeItem(
                 '$(type-hierarchy) Dependencies',
                 vscode.TreeItemCollapsibleState.Collapsed
             );
-            depsItem.contextValue = 'dependencies';
-            depsItem.tooltip = 'Symbols that this symbol depends on';
-            items.push(depsItem);
+            deps.contextValue = 'dependencies';
+            deps.tooltip = 'Symbols that this symbol calls or uses';
 
-            // Impact Analysis
-            const impactItem = new DependencyTreeItem(
+            const impact = new DependencyTreeItem(
                 '$(circuit-board) Impact Analysis',
                 vscode.TreeItemCollapsibleState.Collapsed
             );
-            impactItem.contextValue = 'impact';
-            impactItem.tooltip = 'Show what would be affected if this symbol is deleted';
-            items.push(impactItem);
+            impact.contextValue = 'impact';
+            impact.tooltip = 'What would be affected if this symbol is deleted';
 
-            return items;
+            return [usedBy, deps, impact];
         }
 
-        if (element.contextValue === 'usedby' && this.currentSymbol?.references) {
-            // Group references by file
-            const referencesByFile = new Map<string, vscode.Location[]>();
-
-            for (const ref of this.currentSymbol.references) {
-                // Skip the definition itself
-                if (ref.uri.toString() === this.currentSymbol.uri.toString() &&
-                    ref.range.start.line === this.currentSymbol.range.start.line) {
-                    continue;
-                }
-
-                const fileKey = ref.uri.toString();
-                if (!referencesByFile.has(fileKey)) {
-                    referencesByFile.set(fileKey, []);
-                }
-                referencesByFile.get(fileKey)!.push(ref);
-            }
-
-            const items: DependencyTreeItem[] = [];
-
-            for (const [fileUri, refs] of referencesByFile) {
-                const uri = vscode.Uri.parse(fileUri);
-                const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
-                const relativePath = workspaceFolder
-                    ? vscode.workspace.asRelativePath(uri)
-                    : uri.fsPath;
-
-                const fileItem = new DependencyTreeItem(
-                    `$(file) ${relativePath}`,
-                    vscode.TreeItemCollapsibleState.Expanded
-                );
-                fileItem.contextValue = 'file';
-                fileItem.tooltip = `${refs.length} references in this file`;
-                items.push(fileItem);
-
-                // Add individual references
-                for (const ref of refs) {
-                    const refInfo: SymbolInfo = {
-                        name: this.currentSymbol.name,
-                        kind: this.currentSymbol.kind,
-                        uri: ref.uri,
-                        range: ref.range,
-                        referenceCount: 0
-                    };
-
-                    const refItem = new DependencyTreeItem(
-                        `Line ${ref.range.start.line + 1}`,
-                        vscode.TreeItemCollapsibleState.None,
-                        refInfo,
-                        'reference'
-                    );
-                    items.push(refItem);
-                }
-            }
-
-            return items;
+        if (element.contextValue === 'usedby' && this.currentSymbol) {
+            return this.buildUsedByItems(this.currentSymbol);
         }
 
         if (element.contextValue === 'dependencies' && this.currentSymbol) {
-            // Find what symbols this symbol depends on
-            const dependencies = await this.findDependencies(this.currentSymbol);
-
+            const dependencies = await this.getDependencies(this.currentSymbol);
             if (dependencies.length === 0) {
                 const item = new DependencyTreeItem(
                     '$(check) No dependencies found',
                     vscode.TreeItemCollapsibleState.None
                 );
-                item.tooltip = 'This symbol does not reference other symbols in the workspace';
+                item.tooltip = 'This symbol does not call other symbols in the workspace';
                 return [item];
             }
-
-            return dependencies.map(dep => {
-                const item = new DependencyTreeItem(
-                    `$(symbol-${this.getSymbolIcon(dep.kind)}) ${dep.name}`,
-                    vscode.TreeItemCollapsibleState.None,
-                    dep,
-                    'symbol'
-                );
-                return item;
-            });
+            return dependencies.map(dep => new DependencyTreeItem(
+                `$(symbol-${getSymbolIcon(dep.kind)}) ${dep.name}`,
+                vscode.TreeItemCollapsibleState.None,
+                dep,
+                'symbol'
+            ));
         }
 
         if (element.contextValue === 'impact' && this.currentSymbol) {
-            const impact = await this.analyzeImpact(this.currentSymbol);
-
-            const items: DependencyTreeItem[] = [];
-
-            // Summary
-            const summaryItem = new DependencyTreeItem(
-                impact.canSafelyDelete
-                    ? '$(check) Safe to delete'
-                    : `$(warning) Would affect ${impact.affectedFiles.size} files`,
-                vscode.TreeItemCollapsibleState.None
-            );
-            summaryItem.tooltip = impact.canSafelyDelete
-                ? 'This symbol has no references and can be safely deleted'
-                : `Deleting this would affect ${impact.directReferences} direct references`;
-            items.push(summaryItem);
-
-            if (!impact.canSafelyDelete) {
-                // Show affected files
-                for (const [filePath, count] of impact.affectedFiles) {
-                    const uri = vscode.Uri.parse(filePath);
-                    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
-                    const relativePath = workspaceFolder
-                        ? vscode.workspace.asRelativePath(uri)
-                        : uri.fsPath;
-
-                    const fileItem = new DependencyTreeItem(
-                        `$(file) ${relativePath}`,
-                        vscode.TreeItemCollapsibleState.None
-                    );
-                    fileItem.description = `${count} refs`;
-                    fileItem.tooltip = `${count} references would need to be updated`;
-                    items.push(fileItem);
-                }
-            }
-
-            return items;
+            return this.buildImpactItems(this.currentSymbol);
         }
 
         return [];
     }
 
-    private getSymbolIcon(kind: vscode.SymbolKind): string {
-        switch (kind) {
-            case vscode.SymbolKind.Function: return 'function';
-            case vscode.SymbolKind.Method: return 'method';
-            case vscode.SymbolKind.Class: return 'class';
-            case vscode.SymbolKind.Interface: return 'interface';
-            case vscode.SymbolKind.Variable: return 'variable';
-            default: return 'misc';
+    private buildUsedByItems(symbol: SymbolInfo): DependencyTreeItem[] {
+        const referencesByFile = new Map<string, vscode.Location[]>();
+        for (const ref of symbol.references ?? []) {
+            if (this.isDefinition(ref, symbol)) {
+                continue;
+            }
+            const fileKey = ref.uri.toString();
+            const list = referencesByFile.get(fileKey) ?? [];
+            list.push(ref);
+            referencesByFile.set(fileKey, list);
         }
+
+        const items: DependencyTreeItem[] = [];
+        for (const [fileUri, refs] of referencesByFile) {
+            const uri = vscode.Uri.parse(fileUri);
+            const fileItem = new DependencyTreeItem(
+                `$(file) ${vscode.workspace.asRelativePath(uri)}`,
+                vscode.TreeItemCollapsibleState.Expanded
+            );
+            fileItem.contextValue = 'file';
+            fileItem.description = `${refs.length} ref${refs.length === 1 ? '' : 's'}`;
+            fileItem.tooltip = `${refs.length} references in this file`;
+            items.push(fileItem);
+
+            for (const ref of refs) {
+                items.push(new DependencyTreeItem(
+                    `Line ${ref.range.start.line + 1}`,
+                    vscode.TreeItemCollapsibleState.None,
+                    { name: symbol.name, kind: symbol.kind, uri: ref.uri, range: ref.range, referenceCount: 0 },
+                    'reference'
+                ));
+            }
+        }
+        return items;
     }
 
-    async setCurrentSymbol(document: vscode.TextDocument, position: vscode.Position) {
-        const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-            'vscode.executeDocumentSymbolProvider',
-            document.uri
-        );
-
-        if (!symbols) {
-            this.currentSymbol = undefined;
-            this.refresh();
-            return;
+    private buildImpactItems(symbol: SymbolInfo): DependencyTreeItem[] {
+        const affectedFiles = new Map<string, number>();
+        for (const ref of symbol.references ?? []) {
+            if (this.isDefinition(ref, symbol)) {
+                continue;
+            }
+            const key = ref.uri.toString();
+            affectedFiles.set(key, (affectedFiles.get(key) ?? 0) + 1);
         }
 
-        const symbol = this.findSymbolAtPosition(symbols, position);
+        const canSafelyDelete = affectedFiles.size === 0;
+        const summary = new DependencyTreeItem(
+            canSafelyDelete
+                ? '$(check) Safe to delete'
+                : `$(warning) Would affect ${affectedFiles.size} file${affectedFiles.size === 1 ? '' : 's'}`,
+            vscode.TreeItemCollapsibleState.None
+        );
+        summary.tooltip = canSafelyDelete
+            ? 'This symbol has no references and can be safely deleted'
+            : `Deleting this would affect ${symbol.referenceCount} direct references`;
+
+        const items: DependencyTreeItem[] = [summary];
+        for (const [filePath, count] of affectedFiles) {
+            const uri = vscode.Uri.parse(filePath);
+            const fileItem = new DependencyTreeItem(
+                `$(file) ${vscode.workspace.asRelativePath(uri)}`,
+                vscode.TreeItemCollapsibleState.None
+            );
+            fileItem.description = `${count} ref${count === 1 ? '' : 's'}`;
+            fileItem.tooltip = `${count} references would need to be updated`;
+            items.push(fileItem);
+        }
+        return items;
+    }
+
+    private isDefinition(ref: vscode.Location, symbol: SymbolInfo): boolean {
+        return ref.uri.toString() === symbol.uri.toString() &&
+               !!ref.range.intersection(symbol.range);
+    }
+
+    async setCurrentSymbol(document: vscode.TextDocument, position: vscode.Position): Promise<void> {
+        const opts = { showVariables: vscode.workspace.getConfiguration('referencex').get('showVariables', false) };
+        const symbols = await this.service.getSymbols(document);
+        const symbol = this.service.findSymbolAtPosition(symbols, position, opts);
+
         if (!symbol) {
             this.currentSymbol = undefined;
+            vscode.window.showInformationMessage('ReferenceX: place the cursor on a function, class, method, or interface name.');
             this.refresh();
             return;
         }
 
-        const locations = await vscode.commands.executeCommand<vscode.Location[]>(
-            'vscode.executeReferenceProvider',
-            document.uri,
-            symbol.selectionRange.start
-        );
-
+        const { count, locations } = await this.service.getReferences(document, symbol);
         this.currentSymbol = {
             name: symbol.name,
             kind: symbol.kind,
             uri: document.uri,
             range: symbol.selectionRange,
-            referenceCount: locations ? locations.length - 1 : 0,
+            referenceCount: count,
             references: locations
         };
-
         this.refresh();
     }
 
-    private findSymbolAtPosition(symbols: vscode.DocumentSymbol[], position: vscode.Position): vscode.DocumentSymbol | undefined {
-        for (const symbol of symbols) {
-            if (symbol.selectionRange.contains(position)) {
-                const config = vscode.workspace.getConfiguration('referencex');
-                const showVariables = config.get('showVariables', false);
-
-                if (
-                    symbol.kind === vscode.SymbolKind.Function ||
-                    symbol.kind === vscode.SymbolKind.Method ||
-                    symbol.kind === vscode.SymbolKind.Class ||
-                    symbol.kind === vscode.SymbolKind.Interface ||
-                    (showVariables && symbol.kind === vscode.SymbolKind.Variable)
-                ) {
-                    return symbol;
-                }
-            }
-
-            if (symbol.children && symbol.children.length > 0) {
-                const found = this.findSymbolAtPosition(symbol.children, position);
-                if (found) {
-                    return found;
-                }
-            }
+    /**
+     * Resolve what the current symbol depends on using the language server's
+     * call-hierarchy provider (accurate "outgoing calls"), cached per selection.
+     */
+    private async getDependencies(symbol: SymbolInfo): Promise<SymbolInfo[]> {
+        if (this.dependencyCache) {
+            return this.dependencyCache;
         }
 
-        return undefined;
-    }
-
-    private async findDependencies(symbolInfo: SymbolInfo): Promise<SymbolInfo[]> {
-        const dependencies: SymbolInfo[] = [];
-
+        const deps: SymbolInfo[] = [];
         try {
-            const document = await vscode.workspace.openTextDocument(symbolInfo.uri);
-            const text = document.getText(symbolInfo.range);
-
-            // Get all symbols in the workspace
-            const files = await vscode.workspace.findFiles(
-                '**/*.{ts,tsx,js,jsx}',
-                '**/node_modules/**'
+            const items = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
+                'vscode.prepareCallHierarchy',
+                symbol.uri,
+                symbol.range.start
             );
 
-            const symbolNames = new Set<string>();
+            if (items && items.length > 0) {
+                const outgoing = await vscode.commands.executeCommand<vscode.CallHierarchyOutgoingCall[]>(
+                    'vscode.provideOutgoingCalls',
+                    items[0]
+                ) ?? [];
 
-            for (const file of files) {
-                const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-                    'vscode.executeDocumentSymbolProvider',
-                    file
-                );
-
-                if (symbols) {
-                    this.collectSymbolNames(symbols, symbolNames);
-                }
-            }
-
-            // Check which symbols are referenced in this symbol's text
-            for (const name of symbolNames) {
-                if (name !== symbolInfo.name && text.includes(name)) {
-                    // Find the symbol info
-                    for (const file of files) {
-                        const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-                            'vscode.executeDocumentSymbolProvider',
-                            file
-                        );
-
-                        if (symbols) {
-                            const dep = this.findSymbolByName(symbols, name, file);
-                            if (dep) {
-                                dependencies.push(dep);
-                                break;
-                            }
-                        }
+                const seen = new Set<string>();
+                for (const call of outgoing) {
+                    const to = call.to;
+                    const key = `${to.uri.toString()}::${to.name}::${to.selectionRange.start.line}`;
+                    // Skip self-recursion and duplicates.
+                    if (seen.has(key) ||
+                        (to.uri.toString() === symbol.uri.toString() && to.name === symbol.name)) {
+                        continue;
                     }
+                    seen.add(key);
+                    deps.push({
+                        name: to.name,
+                        kind: to.kind,
+                        uri: to.uri,
+                        range: to.selectionRange,
+                        referenceCount: 0
+                    });
                 }
             }
         } catch (error) {
-            console.error('Error finding dependencies:', error);
+            console.error('ReferenceX: error finding dependencies:', error);
         }
 
-        return dependencies;
-    }
-
-    private collectSymbolNames(symbols: vscode.DocumentSymbol[], names: Set<string>) {
-        for (const symbol of symbols) {
-            if (
-                symbol.kind === vscode.SymbolKind.Function ||
-                symbol.kind === vscode.SymbolKind.Method ||
-                symbol.kind === vscode.SymbolKind.Class ||
-                symbol.kind === vscode.SymbolKind.Interface
-            ) {
-                names.add(symbol.name);
-            }
-
-            if (symbol.children) {
-                this.collectSymbolNames(symbol.children, names);
-            }
-        }
-    }
-
-    private findSymbolByName(symbols: vscode.DocumentSymbol[], name: string, uri: vscode.Uri): SymbolInfo | undefined {
-        for (const symbol of symbols) {
-            if (symbol.name === name) {
-                return {
-                    name: symbol.name,
-                    kind: symbol.kind,
-                    uri,
-                    range: symbol.selectionRange,
-                    referenceCount: 0
-                };
-            }
-
-            if (symbol.children) {
-                const found = this.findSymbolByName(symbol.children, name, uri);
-                if (found) {
-                    return found;
-                }
-            }
-        }
-
-        return undefined;
-    }
-
-    private async analyzeImpact(symbolInfo: SymbolInfo): Promise<{
-        canSafelyDelete: boolean;
-        directReferences: number;
-        affectedFiles: Map<string, number>;
-    }> {
-        const affectedFiles = new Map<string, number>();
-
-        if (symbolInfo.references) {
-            for (const ref of symbolInfo.references) {
-                // Skip the definition
-                if (ref.uri.toString() === symbolInfo.uri.toString() &&
-                    ref.range.start.line === symbolInfo.range.start.line) {
-                    continue;
-                }
-
-                const fileKey = ref.uri.toString();
-                affectedFiles.set(fileKey, (affectedFiles.get(fileKey) || 0) + 1);
-            }
-        }
-
-        return {
-            canSafelyDelete: affectedFiles.size === 0,
-            directReferences: symbolInfo.referenceCount,
-            affectedFiles
-        };
+        deps.sort((a, b) => a.name.localeCompare(b.name));
+        this.dependencyCache = deps;
+        return deps;
     }
 
     async exportToMermaid(): Promise<string> {
         if (!this.currentSymbol) {
-            return 'graph TD\n    A[No symbol selected]';
+            return 'graph TD\n    A["No symbol selected"]';
         }
 
-        let mermaid = 'graph TD\n';
-        const symbolId = 'S0';
-        mermaid += `    ${symbolId}["${this.currentSymbol.name}"]\n`;
-        mermaid += `    style ${symbolId} fill:#4EC9B0\n`;
+        const lines = ['graph TD'];
+        const rootId = 'S0';
+        lines.push(`    ${rootId}["${escapeMermaid(this.currentSymbol.name)}"]`);
+        lines.push(`    style ${rootId} fill:#4EC9B0`);
 
-        // Add references (who uses this)
-        if (this.currentSymbol.references) {
-            let refId = 1;
-            const fileRefs = new Map<string, number>();
-
-            for (const ref of this.currentSymbol.references) {
-                if (ref.uri.toString() === this.currentSymbol.uri.toString() &&
-                    ref.range.start.line === this.currentSymbol.range.start.line) {
-                    continue;
-                }
-
-                const workspaceFolder = vscode.workspace.getWorkspaceFolder(ref.uri);
-                const relativePath = workspaceFolder
-                    ? vscode.workspace.asRelativePath(ref.uri)
-                    : ref.uri.fsPath;
-
-                const fileName = relativePath.split('/').pop() || relativePath;
-                const fileKey = `F${refId}`;
-
-                if (!fileRefs.has(fileName)) {
-                    fileRefs.set(fileName, refId);
-                    mermaid += `    ${fileKey}["${fileName}"]\n`;
-                    mermaid += `    ${fileKey} --> ${symbolId}\n`;
-                    refId++;
-                }
+        // Who uses this symbol, grouped by file.
+        const fileIds = new Map<string, string>();
+        for (const ref of this.currentSymbol.references ?? []) {
+            if (this.isDefinition(ref, this.currentSymbol)) {
+                continue;
+            }
+            const fileName = vscode.workspace.asRelativePath(ref.uri).split('/').pop() ?? ref.uri.fsPath;
+            if (!fileIds.has(fileName)) {
+                const id = `F${fileIds.size}`;
+                fileIds.set(fileName, id);
+                lines.push(`    ${id}["${escapeMermaid(fileName)}"]`);
+                lines.push(`    ${id} --> ${rootId}`);
             }
         }
 
-        // Add dependencies (what this uses)
-        const dependencies = await this.findDependencies(this.currentSymbol);
-        for (let i = 0; i < dependencies.length; i++) {
-            const depId = `D${i}`;
-            mermaid += `    ${depId}["${dependencies[i].name}"]\n`;
-            mermaid += `    ${symbolId} --> ${depId}\n`;
-            mermaid += `    style ${depId} fill:#DCDCAA\n`;
-        }
+        // What this symbol depends on.
+        const dependencies = await this.getDependencies(this.currentSymbol);
+        dependencies.forEach((dep, i) => {
+            const id = `D${i}`;
+            lines.push(`    ${id}["${escapeMermaid(dep.name)}"]`);
+            lines.push(`    ${rootId} --> ${id}`);
+            lines.push(`    style ${id} fill:#DCDCAA`);
+        });
 
-        return mermaid;
+        return lines.join('\n') + '\n';
     }
+}
+
+/** Make a label safe inside a Mermaid `["..."]` node. */
+function escapeMermaid(label: string): string {
+    return label.replace(/"/g, '#quot;').replace(/[\r\n]+/g, ' ');
 }

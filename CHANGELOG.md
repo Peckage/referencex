@@ -2,6 +2,30 @@
 
 All notable changes to the ReferenceX extension will be documented in this file.
 
+## [0.6.0] - 2026-06-22
+
+### Performance
+- Reference lookups now run in parallel (bounded concurrency) instead of one-at-a-time, dramatically speeding up large files and the workspace scan.
+- Added a shared, version-keyed cache so CodeLens, hover, the dependency tree, and the scanner reuse results within a render pass instead of re-querying the language server repeatedly.
+
+### Fixed
+- Fixed the inline-decoration "debounce", which previously fired one update per keystroke instead of coalescing them.
+- Removed duplicate `onDidChangeTextDocument` listeners that did redundant work on every edit.
+- Reference counts are now consistent everywhere — hover and the unused-code scanner now filter out `import`/re-export statements the same way CodeLens/inline does.
+- The definition occurrence is now identified by range intersection rather than list position, fixing miscounts when reference ordering varied.
+- Fixed off-by-one decoration placement on files with CRLF line endings.
+- CodeLens mode no longer leaves blank lenses for hidden (zero/non-zero filtered) symbols.
+- Mermaid export now escapes labels so symbol/file names with quotes no longer break the diagram, and opens as a ready-to-paste fenced Markdown block.
+
+### Changed
+- **Dependencies** in the tree view are now resolved via the language server's call-hierarchy ("outgoing calls") instead of naive workspace-wide substring matching — far more accurate and no longer scans every file twice.
+- Symbol detection now walks the document-symbol tree directly, removing the fragile regular-expression pre-pass (better handling of methods, getters/setters, and multi-line arrow functions).
+- Test-file detection also recognises `__mocks__`.
+
+### Tooling
+- Added the missing ESLint configuration so `npm run lint` works.
+- Updated `@typescript-eslint` to 7.x; `npm audit` now reports 0 vulnerabilities.
+
 ## [0.5.1] - 2025-12-08
 
 ### Fixed

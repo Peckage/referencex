@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
+import { ReferenceService, mapWithConcurrency } from './referenceService';
 
 interface UnusedSymbol {
-    symbol: vscode.DocumentSymbol;
-    uri: vscode.Uri;
+    name: string;
+    kind: vscode.SymbolKind;
     line: number;
     type: string;
 }
@@ -12,13 +13,21 @@ interface FileWithUnused {
     unusedSymbols: UnusedSymbol[];
 }
 
+/** Concurrent files scanned at once. */
+const FILE_CONCURRENCY = 6;
+/** Concurrent reference lookups per file. */
+const SYMBOL_CONCURRENCY = 12;
+
 export class UnusedCodeScanner {
+    constructor(private readonly service: ReferenceService) {}
+
     private isTestFile(uri: vscode.Uri): boolean {
-        const path = uri.fsPath.toLowerCase();
+        const path = uri.fsPath.toLowerCase().replace(/\\/g, '/');
         return path.includes('.test.') ||
                path.includes('.spec.') ||
                path.includes('__tests__') ||
-               path.includes('/tests/');
+               path.includes('/tests/') ||
+               path.includes('/__mocks__/');
     }
 
     private getSymbolTypeName(kind: vscode.SymbolKind): string {
@@ -27,126 +36,83 @@ export class UnusedCodeScanner {
             case vscode.SymbolKind.Method: return 'method';
             case vscode.SymbolKind.Class: return 'class';
             case vscode.SymbolKind.Interface: return 'interface';
+            case vscode.SymbolKind.Constructor: return 'constructor';
             case vscode.SymbolKind.Variable: return 'variable';
             case vscode.SymbolKind.Constant: return 'constant';
             default: return 'symbol';
         }
     }
 
-    private async getUnusedSymbolsInDocument(uri: vscode.Uri, config: any): Promise<UnusedSymbol[]> {
-        const unusedSymbols: UnusedSymbol[] = [];
-
+    private async getUnusedSymbolsInDocument(
+        uri: vscode.Uri,
+        opts: { showVariables: boolean },
+        token: vscode.CancellationToken
+    ): Promise<UnusedSymbol[]> {
         try {
-            const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-                'vscode.executeDocumentSymbolProvider',
-                uri
-            );
+            const document = await vscode.workspace.openTextDocument(uri);
+            const symbols = this.service.collectSymbols(await this.service.getSymbols(document), opts);
 
-            if (!symbols || symbols.length === 0) {
-                return [];
-            }
-
-            const checkSymbol = async (symbol: vscode.DocumentSymbol) => {
-                // Only check relevant symbol types
-                if (
-                    symbol.kind === vscode.SymbolKind.Function ||
-                    symbol.kind === vscode.SymbolKind.Method ||
-                    symbol.kind === vscode.SymbolKind.Class ||
-                    symbol.kind === vscode.SymbolKind.Interface ||
-                    (config.showVariables && symbol.kind === vscode.SymbolKind.Variable)
-                ) {
-                    const locations = await vscode.commands.executeCommand<vscode.Location[]>(
-                        'vscode.executeReferenceProvider',
-                        uri,
-                        symbol.selectionRange.start
-                    );
-
-                    const referenceCount = locations ? locations.length - 1 : 0;
-
-                    if (referenceCount === 0) {
-                        unusedSymbols.push({
-                            symbol,
-                            uri,
-                            line: symbol.range.start.line,
-                            type: this.getSymbolTypeName(symbol.kind)
-                        });
-                    }
+            const results = await mapWithConcurrency(symbols, SYMBOL_CONCURRENCY, async symbol => {
+                const { count } = await this.service.getReferences(document, symbol);
+                if (count > 0) {
+                    return undefined;
                 }
+                return {
+                    name: symbol.name,
+                    kind: symbol.kind,
+                    line: symbol.range.start.line,
+                    type: this.getSymbolTypeName(symbol.kind)
+                } satisfies UnusedSymbol;
+            }, token);
 
-                // Check children recursively
-                if (symbol.children && symbol.children.length > 0) {
-                    for (const child of symbol.children) {
-                        await checkSymbol(child);
-                    }
-                }
-            };
-
-            for (const symbol of symbols) {
-                await checkSymbol(symbol);
-            }
+            return results.filter((s): s is UnusedSymbol => s !== undefined);
         } catch (error) {
-            console.error(`Error scanning ${uri.fsPath}:`, error);
+            console.error(`ReferenceX: error scanning ${uri.fsPath}:`, error);
+            return [];
         }
-
-        return unusedSymbols;
     }
 
     public async scanWorkspace(): Promise<FileWithUnused[]> {
         const config = vscode.workspace.getConfiguration('referencex');
         const excludeTests = config.get('excludeTests', false);
-        const showVariables = config.get('showVariables', false);
+        const opts = { showVariables: config.get('showVariables', false) };
 
-        // Find all TypeScript/JavaScript files
-        const files = await vscode.workspace.findFiles(
-            '**/*.{ts,tsx,js,jsx}',
-            '**/node_modules/**'
-        );
+        const allFiles = await vscode.workspace.findFiles('**/*.{ts,tsx,js,jsx}', '**/node_modules/**');
+        const files = excludeTests ? allFiles.filter(f => !this.isTestFile(f)) : allFiles;
 
         const filesWithUnused: FileWithUnused[] = [];
 
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
-            title: "Scanning for unused code...",
+            title: 'ReferenceX: scanning for unused code…',
             cancellable: true
         }, async (progress, token) => {
-            const totalFiles = files.length;
-            let processedFiles = 0;
+            let processed = 0;
+            const total = files.length;
 
-            for (const file of files) {
+            await mapWithConcurrency(files, FILE_CONCURRENCY, async file => {
                 if (token.isCancellationRequested) {
-                    break;
+                    return;
                 }
-
-                // Skip test files if configured
-                if (excludeTests && this.isTestFile(file)) {
-                    processedFiles++;
-                    continue;
-                }
-
-                progress.report({
-                    message: `${processedFiles + 1}/${totalFiles} files`,
-                    increment: (1 / totalFiles) * 100
-                });
-
-                const unusedSymbols = await this.getUnusedSymbolsInDocument(file, {
-                    showVariables
-                });
-
+                const unusedSymbols = await this.getUnusedSymbolsInDocument(file, opts, token);
                 if (unusedSymbols.length > 0) {
-                    filesWithUnused.push({
-                        uri: file,
-                        unusedSymbols
-                    });
+                    filesWithUnused.push({ uri: file, unusedSymbols });
                 }
-
-                processedFiles++;
-            }
+                processed++;
+                progress.report({
+                    message: `${processed}/${total} files`,
+                    increment: total > 0 ? (1 / total) * 100 : 0
+                });
+            }, token);
         });
 
+        // Stable ordering for a predictable list.
+        filesWithUnused.sort((a, b) =>
+            vscode.workspace.asRelativePath(a.uri).localeCompare(vscode.workspace.asRelativePath(b.uri)));
         return filesWithUnused;
     }
 
-    public async showUnusedCodeOverview() {
+    public async showUnusedCodeOverview(): Promise<void> {
         const filesWithUnused = await this.scanWorkspace();
 
         if (filesWithUnused.length === 0) {
@@ -154,41 +120,25 @@ export class UnusedCodeScanner {
             return;
         }
 
-        // Create quick pick items
         interface UnusedCodeQuickPickItem extends vscode.QuickPickItem {
             uri?: vscode.Uri;
             line?: number;
         }
 
         const items: UnusedCodeQuickPickItem[] = [];
-
-        // Add summary item
         const totalUnused = filesWithUnused.reduce((sum, file) => sum + file.unusedSymbols.length, 0);
-        items.push({
-            label: `$(info) Found ${totalUnused} unused symbol${totalUnused === 1 ? '' : 's'} in ${filesWithUnused.length} file${filesWithUnused.length === 1 ? '' : 's'}`,
-            description: '',
-            kind: vscode.QuickPickItemKind.Separator
-        });
 
-        // Group by file
         for (const file of filesWithUnused) {
-            const workspaceFolder = vscode.workspace.getWorkspaceFolder(file.uri);
-            const relativePath = workspaceFolder
-                ? vscode.workspace.asRelativePath(file.uri)
-                : file.uri.fsPath;
-
-            // File header
+            const relativePath = vscode.workspace.asRelativePath(file.uri);
             items.push({
-                label: `$(file) ${relativePath}`,
+                label: relativePath,
                 description: `${file.unusedSymbols.length} unused`,
                 kind: vscode.QuickPickItemKind.Separator
             });
 
-            // Individual symbols
             for (const unused of file.unusedSymbols) {
-                const icon = this.getIconForType(unused.type);
                 items.push({
-                    label: `  ${icon} ${unused.symbol.name}`,
+                    label: `${this.getIconForType(unused.type)} ${unused.name}`,
                     description: `${unused.type} · line ${unused.line + 1}`,
                     detail: relativePath,
                     uri: file.uri,
@@ -198,12 +148,12 @@ export class UnusedCodeScanner {
         }
 
         const selected = await vscode.window.showQuickPick(items, {
-            placeHolder: 'Select an unused symbol to navigate to it',
+            placeHolder: `Found ${totalUnused} unused symbol${totalUnused === 1 ? '' : 's'} in ${filesWithUnused.length} file${filesWithUnused.length === 1 ? '' : 's'} — select one to navigate`,
             matchOnDescription: true,
             matchOnDetail: true
         });
 
-        if (selected && selected.uri && selected.line !== undefined) {
+        if (selected?.uri && selected.line !== undefined) {
             const document = await vscode.workspace.openTextDocument(selected.uri);
             const editor = await vscode.window.showTextDocument(document);
             const position = new vscode.Position(selected.line, 0);
@@ -218,6 +168,7 @@ export class UnusedCodeScanner {
             case 'method': return '$(symbol-method)';
             case 'class': return '$(symbol-class)';
             case 'interface': return '$(symbol-interface)';
+            case 'constructor': return '$(symbol-constructor)';
             case 'variable': return '$(symbol-variable)';
             case 'constant': return '$(symbol-constant)';
             default: return '$(symbol-misc)';

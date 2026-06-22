@@ -4,7 +4,7 @@ A VS Code extension that shows inline reference counts for TypeScript/JavaScript
 
 ## Features
 
-- **Dependency Graph Visualization** - Interactive tree view showing symbol dependencies and relationships
+- **Dependency Graph Visualization** - Interactive tree view showing symbol dependencies and relationships, powered by the language server's call hierarchy for accurate results
 - **Impact Analysis** - See what would be affected if you delete a symbol
 - **Inline Reference Counts** - See how many times each symbol is referenced, right where it's defined
 - **Interactive Hover** - Hover over any symbol to see reference count and clickable link to view all references
